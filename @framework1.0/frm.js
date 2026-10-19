@@ -8,7 +8,7 @@
 
   const VERSION = '1.0.0';
   const CFG = Object.assign({
-    cloud: 'https://framework.itrypro.ru/',
+    cloud: 'https://raw.githubusercontent.com/IGBerko/framework/refs/heads/main/%40framework1.0/plugins/',
     manifest: 'https://raw.githubusercontent.com/IGBerko/framework/refs/heads/main/framework.json',
     checkUpdates: true,
     welcome: true
@@ -351,7 +351,7 @@
       h('div', { class: 'card' }, h('h2', null, 'Что это такое'),
         h('p', null, 'Framework — лёгкий слой поверх JavaScript: реактивные данные, шаблоны прямо в HTML, плагины и каталог сторонних библиотек. Без сборки и npm — достаточно одного <script>.')),
       h('div', { class: 'card' }, h('h2', null, '1. Подключение'),
-        code('<script src="https://framework.itrypro.ru/@framework1.0/frm.js"></script>\n<frameplugins src="framecloud/1.0/math"></frameplugins>')),
+        code('<script src="https://raw.githubusercontent.com/IGBerko/framework/refs/heads/main/%40framework1.0/frm.js"></script>\n<frameplugins src="framecloud/1.0/math"></frameplugins>')),
       h('div', { class: 'card' }, h('h2', null, '2. Реактивное приложение'),
         code('<div id="app">\n  <input f-model="name" placeholder="Имя">\n  <h2>Привет, {{ name || "незнакомец" }}!</h2>\n  <button @click="count++">Кликов: {{ count }}</button>\n</div>\n<script>\n  Framework.app("#app", { state: { name: "", count: 0 } });\n</script>'),
         h('p', null, 'Директивы: ', h('code', null, 'f-text'), ' ', h('code', null, 'f-html'), ' ', h('code', null, 'f-show'), ' ', h('code', null, 'f-model'), ' ', h('code', null, '@click'), ' ', h('code', null, 'f-bind:attr'), '.')),
