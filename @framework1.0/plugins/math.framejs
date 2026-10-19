@@ -1,0 +1,22 @@
+/* Плагин math — framecloud/1.0/math */
+Framework.plugin('math', {
+  version: '1.0.0',
+  install(fw) {
+    const nums = a => a.flat().map(Number).filter(n => !Number.isNaN(n));
+    fw.math = {
+      sum: (...a) => nums(a).reduce((s, n) => s + n, 0),
+      avg(...a) { const n = nums(a); return n.length ? fw.math.sum(n) / n.length : 0; },
+      median(...a) {
+        const n = nums(a).sort((x, y) => x - y), m = n.length >> 1;
+        return n.length ? (n.length % 2 ? n[m] : (n[m - 1] + n[m]) / 2) : 0;
+      },
+      min: (...a) => Math.min(...nums(a)),
+      max: (...a) => Math.max(...nums(a)),
+      clamp: (v, lo, hi) => Math.min(hi, Math.max(lo, v)),
+      lerp: (a, b, t) => a + (b - a) * t,
+      round: (v, digits = 0) => { const k = 10 ** digits; return Math.round(v * k) / k; },
+      percent: (part, total, digits = 1) => total ? fw.math.round(part / total * 100, digits) : 0,
+      randInt: (lo, hi) => Math.floor(Math.random() * (hi - lo + 1)) + lo
+    };
+  }
+});
