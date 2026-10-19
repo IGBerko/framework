@@ -8,8 +8,8 @@
 
   const VERSION = '1.0.0';
   const CFG = Object.assign({
-    cloud: 'https://raw.githubusercontent.com/IGBerko/framework/refs/heads/main/%40framework1.0/plugins/',
-    manifest: 'https://raw.githubusercontent.com/IGBerko/framework/refs/heads/main/framework.json',
+    cloud: 'https://cdn.jsdelivr.net/gh/IGBerko/framework@main/%40framework1.0/plugins/',
+    manifest: 'https://cdn.jsdelivr.net/gh/IGBerko/framework@main/framework.json',
     checkUpdates: true,
     welcome: true
   }, global.FrameworkConfig || {});
