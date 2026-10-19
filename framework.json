@@ -1,13 +1,7 @@
 {
-  "latest": "1.1.0",
-  "url": "https://github.com/itrypro/framework/releases/latest",
+  "latest": "1.0",
+  "url": "https://raw.githubusercontent.com/IGBerko/framework/refs/heads/main/%40framework1.0/frm.js",
   "changelog": {
-    "1.1.0": {
-      "date": "2026-11-01",
-      "added": ["Директива f-for", "Плагин router"],
-      "changed": ["Yozilla: журнал сохраняется между перезагрузками"],
-      "fixed": ["f-model для select multiple"]
-    },
     "1.0.0": {
       "date": "2026-10-18",
       "added": ["Первый релиз"]
