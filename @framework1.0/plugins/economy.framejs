@@ -1,0 +1,195 @@
+/* Плагин economy — жизнь города: спрос RCI, рост зданий, счастье, бюджет, пожары, машины. Расширяет Framework.City */
+Framework.plugin('economy', {
+  version: '1.0.0',
+  requires: ['framecloud/1.0/citysim'],
+  install(fw) {
+    const C = fw.City, { N, BUILD, ZONE, ROAD, MILESTONES, DIRS } = fw.CITY;
+    const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+    const zkey = t => (t === 'R' ? 1 : t === 'C' ? 2 : t === 'I' ? 3 : 0);
+    const POWER_USE = { R: [1, 2, 4], C: [2, 4, 8], I: [3, 6, 10] };
+    const WATER_USE = { R: [1, 2, 4], C: [1, 2, 3], I: [2, 3, 5] };
+    const P = C.prototype;
+
+    P.capPop = function (b) { return b.type === 'R' ? ZONE[1].pop[b.lvl - 1] : 0; };
+    P.capJobs = function (b) { const z = zkey(b.type); return z > 1 ? ZONE[z].jobs[b.lvl - 1] : 0; };
+    P.isZoned = function (b) { return b.type === 'R' || b.type === 'C' || b.type === 'I'; };
+
+    // ----- статистика и спрос -----
+    P.updateStats = function () {
+      const s = this.stats; let pop = 0, jc = 0, ji = 0, pu = 0, wu = 0, hw = 0, hp = 0, ab = 0;
+      for (const b of this.blds.values()) {
+        if (!this.isZoned(b)) continue;
+        const live = b.power && b.water;
+        if (b.abandon) ab++;
+        const k = b.lvl - 1;
+        if (b.type === 'R') { pop += b.pop; hp += b.pop; hw += b.happy * b.pop; }
+        if (b.type === 'C') jc += live ? this.capJobs(b) : 0;
+        if (b.type === 'I') ji += live ? this.capJobs(b) : 0;
+        pu += POWER_USE[b.type][k]; wu += WATER_USE[b.type][k];
+      }
+      s.pop = pop; s.workers = Math.round(pop * 0.6); s.jobsC = jc; s.jobsI = ji;
+      s.employed = Math.min(s.workers, jc + ji); s.unemployed = Math.max(0, s.workers - jc - ji);
+      s.powerUse = pu; s.waterUse = wu; s.abandoned = ab;
+      s.happy = hp ? Math.round(hw / hp) : 60;
+      const roads = this.roadCount();
+      s.traffic = roads ? Math.round(clamp(this.cars.length / roads * 67, 0, 100)) : 0;
+      const jobs = jc + ji, vr = (jobs - s.workers) / Math.max(20, jobs + s.workers);
+      const tc = pop * 0.3, ti = pop * 0.35 + 6;
+      s.demand.r = clamp(0.35 + vr * 0.9 - (this.tax.r - 9) * 0.04 + (s.happy - 55) / 160, 0, 1);
+      s.demand.c = clamp(0.12 + (tc - jc) / Math.max(15, tc) * 0.8 - (this.tax.c - 9) * 0.04, 0, 1);
+      s.demand.i = clamp(0.30 + (ti - ji) / Math.max(15, ti) * 0.7 - (this.tax.i - 9) * 0.04, 0, 1);
+    };
+    P.roadCount = function () { if (this._rc == null) { let n = 0; for (let i = 0; i < this.road.length; i++) if (this.road[i]) n++; this._rc = n; } return this._rc; };
+
+    // ----- ежедневный шаг -----
+    P.dayTick = function () {
+      const d = this.date; this.days++;
+      if (++d.day > 30) { d.day = 1; if (++d.month > 12) { d.month = 1; d.year++; } this.monthTick(); }
+      if (this.dirty) this.rebuildNets();
+      this.updateStats();
+      this.spawnBuildings();
+      this.growPopulation();
+      for (let i = 0; i < this.traffic.length; i++) this.traffic[i] *= 0.9;
+    };
+
+    P.spawnBuildings = function () {
+      const s = this.stats;
+      if (s.powerUse >= s.powerCap && s.powerCap > 0 && Math.random() < 0.02) this.say('Не хватает электричества — постройте ещё электростанции', 'warn');
+      if (s.waterUse >= s.waterCap && s.waterCap > 0 && Math.random() < 0.02) this.say('Не хватает воды — постройте водокачку', 'warn');
+      if (s.powerUse >= s.powerCap || s.waterUse >= s.waterCap) return;
+      const tries = 2 + Math.min(4, (this.blds.size / 40) | 0);
+      for (let t = 0; t < tries; t++) {
+        const r = Math.random() * (s.demand.r + s.demand.c + s.demand.i);
+        const z = r < s.demand.r ? 1 : r < s.demand.r + s.demand.c ? 2 : 3;
+        const dem = z === 1 ? s.demand.r : z === 2 ? s.demand.c : s.demand.i;
+        if (Math.random() > dem * 1.4) continue;
+        const cand = [];
+        for (let i = 0; i < this.zone.length; i++) {
+          if (this.zone[i] !== z || this.occ[i]) continue;
+          const x = i % N, y = (i / N) | 0;
+          if (this.roadNear(x, y, 1, 1, 2, this.powerNet) < 0 || this.roadNear(x, y, 1, 1, 2, this.waterNet) < 0) continue;
+          cand.push(i);
+        }
+        if (!cand.length) continue;
+        const i = cand[(Math.random() * cand.length) | 0];
+        const b = this.addBuilding(z === 1 ? 'R' : z === 2 ? 'C' : 'I', i % N, (i / N) | 0);
+        b.power = b.water = b.road = true; this.onSpawn && this.onSpawn(b);
+      }
+    };
+
+    P.growPopulation = function () {
+      for (const b of this.blds.values()) {
+        if (!this.isZoned(b)) continue;
+        b.age++;
+        const live = b.power && b.water && b.road;
+        if (b.type === 'R') {
+          const cap = this.capPop(b);
+          if (live && b.happy >= 40 && b.pop < cap) b.pop = Math.min(cap, b.pop + Math.max(1, Math.ceil(cap * 0.1)));
+          else if (!live || b.happy < 25) b.pop = Math.max(0, b.pop - Math.ceil(cap * 0.1));
+        } else b.jobs = live ? this.capJobs(b) : 0;
+      }
+    };
+
+    // ----- ежемесячный шаг -----
+    P.computeValue = function () {
+      const v = this.value;
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+        const i = this.idx(x, y); let val = 30;
+        for (let dy = -3; dy <= 3 && val < 31; dy++) for (let dx = -3; dx <= 3; dx++) { const xx = x + dx, yy = y + dy; if (this.inb(xx, yy) && !this.ter[this.idx(xx, yy)]) { val = 40; break; } }
+        val += this.cov.park[i] * 0.25 + this.cov.edu[i] * 0.1 + this.cov.police[i] * 0.1 + this.cov.health[i] * 0.1 + this.cov.fire[i] * 0.05;
+        val -= this.pollution[i] * 14;
+        v[i] = clamp(val, 0, 100);
+      }
+    };
+
+    P.monthTick = function () {
+      const s = this.stats;
+      this.rebuildNets(); this.updateStats(); this.computeValue();
+      const short = s.powerUse > s.powerCap || s.waterUse > s.waterCap;
+      let burned = 0, abandoned = 0;
+      for (const b of Array.from(this.blds.values())) {
+        if (!this.isZoned(b)) continue;
+        const i = this.idx(b.x, b.y), cx = this.cov;
+        let h = 54 + cx.police[i] * 0.12 + cx.fire[i] * 0.08 + cx.health[i] * 0.12 + cx.park[i] * 0.14 + (this.value[i] - 35) * 0.25;
+        if (b.type !== 'I') h -= this.pollution[i] * 12;
+        if (b.type === 'R') h += cx.edu[i] * 0.08;
+        h -= (this.tax[b.type.toLowerCase()] - 9) * 2.5;
+        if (s.unemployed > s.workers * 0.15 + 4) h -= 8;
+        if (short) h -= 8;
+        if (s.traffic > 70) h -= 6;
+        if (!b.power) h -= 30; if (!b.water) h -= 30;
+        b.happy = Math.round(clamp(h, 0, 100));
+        // заброшенность
+        if (!b.power || !b.water || !b.road) {
+          if (++b.abandon >= 3) { this.removeBuilding(b); abandoned++; continue; }
+        } else b.abandon = 0;
+        // пожары
+        if (cx.fire[i] < 30 && Math.random() < 0.004) { this.removeBuilding(b); burned++; continue; }
+        // рост и упадок
+        const need = b.lvl === 1 ? 45 : 60;
+        if (b.lvl < 3 && b.happy > 68 && this.value[i] > need && Math.random() < 0.25 && (b.lvl < 2 || b.type === 'I' || cx.edu[i] > 15)) {
+          b.lvl++; this.dirty = true;
+        } else if (b.lvl > 1 && b.happy < 22 && Math.random() < 0.3) { b.lvl--; this.dirty = true; }
+      }
+      if (burned) this.say(burned > 1 ? `Пожары! Сгорело зданий: ${burned}. Постройте пожарные части` : 'Пожар! Здание сгорело. Нужна пожарная часть', 'bad');
+      if (abandoned) this.say(`Заброшено зданий: ${abandoned} (нет света, воды или дороги)`, 'warn');
+      if (this.dirty) this.rebuildNets();
+
+      // бюджет
+      const b = this.budget; b.taxR = b.taxC = b.taxI = b.roads = b.services = 0;
+      for (const bl of this.blds.values()) {
+        const d = BUILD[bl.type];
+        if (d) { b.services += d.upkeep; continue; }
+        if (!(bl.power && bl.water)) continue;
+        const lv = 1 + 0.2 * (bl.lvl - 1);
+        if (bl.type === 'R') b.taxR += bl.pop * 7 * lv * this.tax.r / 9;
+        if (bl.type === 'C') b.taxC += bl.jobs * 10 * lv * this.tax.c / 9;
+        if (bl.type === 'I') b.taxI += bl.jobs * 9 * lv * this.tax.i / 9;
+      }
+      for (let i = 0; i < this.road.length; i++) if (this.road[i]) b.roads += ROAD[this.road[i]].upkeep;
+      for (const k of ['taxR', 'taxC', 'taxI', 'roads', 'services']) b[k] = Math.round(b[k]);
+      s.income = b.taxR + b.taxC + b.taxI; s.expense = b.roads + b.services;
+      if (!this.sandbox) this.money += s.income - s.expense;
+      if (this.money < 0 && !this.sandbox) this.say('Бюджет в минусе! Повысьте налоги или закройте дорогие службы', 'bad');
+
+      this.history.pop.push(s.pop); this.history.money.push(Math.round(this.money));
+      if (this.history.pop.length > 48) { this.history.pop.shift(); this.history.money.shift(); }
+
+      // вехи развития
+      let m = 0; MILESTONES.forEach((x, k) => { if (s.pop >= x.pop) m = k; });
+      if (m > this.milestone) { this.milestone = m; this.say(`Ваш город вырос: «${MILESTONES[m].name}»! Открыты новые здания`, 'good'); this.onMilestone && this.onMilestone(m); }
+      this.onMonth && this.onMonth();
+    };
+
+    // ----- машины -----
+    P.updateCars = function (dt) {
+      if (this.dirty) this.rebuildNets();
+      if (!this._cells) { this._cells = []; for (let i = 0; i < this.road.length; i++) if (this.road[i]) this._cells.push(i); }
+      const target = Math.min(220, Math.floor(this.stats.pop / 6));
+      while (this.cars.length < target && this._cells.length > 1) {
+        const i = this._cells[(Math.random() * this._cells.length) | 0];
+        this.cars.push({ x: i % N, y: (i / N) | 0, nx: i % N, ny: (i / N) | 0, t: 1, dx: 1, dy: 0, sp: 1.2 + Math.random() * 1.2, hue: (Math.random() * 360) | 0 });
+      }
+      if (this.cars.length > target) this.cars.length = target;
+      for (const c of this.cars) {
+        c.t += dt * c.sp;
+        let guard = 0;
+        while (c.t >= 1 && guard++ < 3) {
+          c.t -= 1; c.x = c.nx; c.y = c.ny;
+          this.traffic[this.idx(c.x, c.y)] += 1;
+          const opts = [];
+          for (const [dx, dy] of DIRS) {
+            const nx = c.x + dx, ny = c.y + dy;
+            if (this.inb(nx, ny) && this.road[this.idx(nx, ny)] && !(dx === -c.dx && dy === -c.dy)) opts.push([dx, dy]);
+          }
+          if (!opts.length) { opts.push([-c.dx, -c.dy]); }
+          const straight = opts.find(o => o[0] === c.dx && o[1] === c.dy);
+          const pick = straight && Math.random() < 0.65 ? straight : opts[(Math.random() * opts.length) | 0];
+          c.dx = pick[0]; c.dy = pick[1]; c.nx = c.x + c.dx; c.ny = c.y + c.dy;
+          if (!this.inb(c.nx, c.ny) || !this.road[this.idx(c.nx, c.ny)]) { c.nx = c.x; c.ny = c.y; c.t = 0; }
+        }
+      }
+      this.cars = this.cars.filter(c => this.road[this.idx(c.x, c.y)]);
+    };
+  }
+});

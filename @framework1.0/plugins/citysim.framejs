@@ -1,0 +1,257 @@
+/* Плагин citysim — модель города: карта, дороги, зоны, здания, сети, покрытие служб. Framework.City */
+Framework.plugin('citysim', {
+  version: '1.0.0',
+  requires: ['framecloud/1.0/noise'],
+  install(fw) {
+    const N = 64;
+
+    // Здания, которые ставит игрок (зональные R/C/I появляются сами)
+    const BUILD = {
+      wind:   { name: 'Ветряк',            w: 1, h: 1, cost: 1500, upkeep: 60,  power: 8,  unlock: 0,    color: '#cfd8dc', hgt: 34 },
+      coal:   { name: 'Угольная ТЭС',      w: 2, h: 2, cost: 9000, upkeep: 400, power: 70, unlock: 0,    color: '#78716c', hgt: 42, poll: 1 },
+      pump:   { name: 'Водокачка',         w: 2, h: 2, cost: 4000, upkeep: 200, water: 90, unlock: 0,    color: '#38bdf8', hgt: 24 },
+      park:   { name: 'Парк',              w: 1, h: 1, cost: 800,  upkeep: 20,  unlock: 100,  color: '#4ade80', hgt: 4, cov: 'park', r: 6 },
+      fire:   { name: 'Пожарная часть',    w: 2, h: 2, cost: 2500, upkeep: 150, unlock: 100,  color: '#ef4444', hgt: 22, cov: 'fire', r: 10 },
+      police: { name: 'Полиция',           w: 2, h: 2, cost: 3000, upkeep: 200, unlock: 500,  color: '#3b82f6', hgt: 22, cov: 'police', r: 10 },
+      school: { name: 'Школа',             w: 2, h: 2, cost: 4000, upkeep: 250, unlock: 500,  color: '#f59e0b', hgt: 22, cov: 'edu', r: 10 },
+      clinic: { name: 'Больница',          w: 2, h: 2, cost: 5500, upkeep: 350, unlock: 1500, color: '#f8fafc', hgt: 30, cov: 'health', r: 12 }
+    };
+    // Параметры зональных зданий по уровням
+    const ZONE = {
+      1: { name: 'Жилой',       color: '#22c55e', pop: [4, 12, 30], hgt: [14, 24, 40], base: ['#d6a77a', '#c98f6b', '#b9bcc8'] },
+      2: { name: 'Коммерческий', color: '#3b82f6', jobs: [4, 10, 24], hgt: [12, 20, 36], base: ['#7dd3fc', '#60a5fa', '#a5b4fc'] },
+      3: { name: 'Промышленный', color: '#eab308', jobs: [6, 16, 40], hgt: [14, 20, 28], base: ['#d4a64a', '#c08a2e', '#a3712a'] }
+    };
+    const ROAD = { 1: { name: 'Улица', cost: 10, upkeep: 0.5 }, 2: { name: 'Проспект', cost: 25, upkeep: 1.2 } };
+    const COV = ['fire', 'police', 'health', 'edu', 'park'];
+    const MILESTONES = [
+      { pop: 0, name: 'Хутор' }, { pop: 100, name: 'Посёлок' }, { pop: 500, name: 'Городок' },
+      { pop: 1500, name: 'Город' }, { pop: 3000, name: 'Большой город' }, { pop: 8000, name: 'Мегаполис' }
+    ];
+    const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+
+    class City {
+      constructor(opts = {}) {
+        this.N = N;
+        this.seed = opts.seed != null ? opts.seed : (Math.random() * 1e9) | 0;
+        this.name = opts.name || 'Новый город';
+        this.sandbox = !!opts.sandbox;
+        const n2 = N * N;
+        this.ter = new Uint8Array(n2); this.tree = new Uint8Array(n2);
+        this.road = new Uint8Array(n2); this.zone = new Uint8Array(n2);
+        this.occ = new Int32Array(n2);          // id здания в клетке (0 — пусто)
+        this.powerNet = new Uint8Array(n2); this.waterNet = new Uint8Array(n2);
+        this.cov = {}; COV.forEach(k => this.cov[k] = new Uint8Array(n2));
+        this.pollution = new Float32Array(n2); this.value = new Float32Array(n2);
+        this.traffic = new Float32Array(n2);
+        this.blds = new Map(); this.nextId = 1; this.dirty = true;
+        this.money = this.sandbox ? 9999999 : 60000;
+        this.date = { day: 1, month: 1, year: 2026 }; this.days = 0;
+        this.tax = { r: 9, c: 9, i: 9 };
+        this.stats = {
+          pop: 0, workers: 0, jobsC: 0, jobsI: 0, employed: 0, unemployed: 0, happy: 60,
+          demand: { r: 0.6, c: 0.2, i: 0.2 }, powerCap: 0, powerUse: 0, waterCap: 0, waterUse: 0,
+          income: 0, expense: 0, traffic: 0, abandoned: 0
+        };
+        this.budget = { taxR: 0, taxC: 0, taxI: 0, roads: 0, services: 0 };
+        this.history = { pop: [], money: [] };
+        this.milestone = 0; this.cars = []; this.log = [];
+        this.generate();
+      }
+
+      idx(x, y) { return y * N + x; }
+      inb(x, y) { return x >= 0 && y >= 0 && x < N && y < N; }
+      isLand(x, y) { return this.inb(x, y) && this.ter[this.idx(x, y)] === 1; }
+      say(text, kind = 'info') { this.log.push({ text, kind, day: this.days }); if (this.log.length > 60) this.log.shift(); this.onLog && this.onLog(text, kind); }
+
+      generate() {
+        const hm = fw.noise.heightmap(N, this.seed), rnd = fw.noise.rng(this.seed + 5);
+        for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+          const i = this.idx(x, y);
+          this.ter[i] = hm[i] > 0.47 ? 1 : 0;
+          this.tree[i] = this.ter[i] && fw.noise.fbm(x / 7, y / 7, this.seed + 9, 3) > 0.52 && rnd() < 0.55 ? 1 : 0;
+        }
+      }
+
+      // есть ли в прямоугольнике (расширенном на r) дорога; возвращает индекс клетки или -1
+      roadNear(x, y, w, h, r, net) {
+        let best = -1, bd = 1e9;
+        for (let yy = y - r; yy < y + h + r; yy++) for (let xx = x - r; xx < x + w + r; xx++) {
+          if (!this.inb(xx, yy)) continue;
+          const i = this.idx(xx, yy);
+          if (!this.road[i] || (net && !net[i])) continue;
+          const d = Math.abs(xx - x - w / 2 + 0.5) + Math.abs(yy - y - h / 2 + 0.5);
+          if (d < bd) { bd = d; best = i; }
+        }
+        return best;
+      }
+
+      // ----- строительство -----
+      unlocked(popNeeded) { return this.sandbox || this.stats.pop >= popNeeded; }
+      spend(c) { if (this.sandbox) return true; if (this.money < c) return false; this.money -= c; return true; }
+
+      placeRoad(x, y, type) {
+        if (!this.isLand(x, y)) return { ok: false, reason: 'Нельзя строить на воде' };
+        const i = this.idx(x, y);
+        if (this.occ[i]) return { ok: false, reason: 'Клетка занята зданием' };
+        if (this.road[i] === type) return { ok: true, cost: 0, same: true };
+        if (type === 2 && !this.unlocked(500)) return { ok: false, reason: 'Проспекты откроются при 500 жителях' };
+        const cost = Math.max(0, ROAD[type].cost - (this.road[i] ? ROAD[this.road[i]].cost : 0));
+        if (!this.spend(cost)) return { ok: false, reason: 'Не хватает денег' };
+        this.road[i] = type; this.zone[i] = 0; this.tree[i] = 0; this.dirty = true;
+        return { ok: true, cost };
+      }
+
+      setZone(x, y, z) {
+        if (!this.isLand(x, y)) return { ok: false, reason: 'Нельзя зонировать воду' };
+        const i = this.idx(x, y);
+        if (this.road[i]) return { ok: false, reason: 'Это дорога' };
+        if (this.occ[i]) return { ok: false, reason: 'Занято' };
+        if (this.zone[i] === z) return { ok: true, cost: 0, same: true };
+        if (z && this.roadNear(x, y, 1, 1, 2) < 0) return { ok: false, reason: 'Зона должна быть рядом с дорогой' };
+        this.zone[i] = z; this.tree[i] = 0;
+        return { ok: true, cost: 0 };
+      }
+
+      canPlace(type, x, y) {
+        const d = BUILD[type];
+        if (!d) return { ok: false, reason: 'Неизвестное здание' };
+        if (!this.unlocked(d.unlock)) return { ok: false, reason: `Откроется при ${d.unlock} жителях` };
+        for (let yy = y; yy < y + d.h; yy++) for (let xx = x; xx < x + d.w; xx++) {
+          if (!this.isLand(xx, yy)) return { ok: false, reason: 'Нужна ровная суша' };
+          const i = this.idx(xx, yy);
+          if (this.road[i]) return { ok: false, reason: 'Мешает дорога' };
+          if (this.occ[i]) return { ok: false, reason: 'Клетка занята' };
+        }
+        if (type !== 'park' && this.roadNear(x, y, d.w, d.h, 1) < 0) return { ok: false, reason: 'Нужен выход на дорогу' };
+        if (!this.sandbox && this.money < d.cost) return { ok: false, reason: 'Не хватает денег' };
+        return { ok: true, cost: d.cost };
+      }
+
+      addBuilding(type, x, y, extra) {
+        const d = BUILD[type], zd = ZONE[type === 'R' ? 1 : type === 'C' ? 2 : type === 'I' ? 3 : 0];
+        const w = d ? d.w : 1, h = d ? d.h : 1;
+        const b = Object.assign({ id: this.nextId++, type, x, y, w, h, lvl: 1, pop: 0, jobs: 0, happy: 55, age: 0,
+          power: false, water: false, road: false, abandon: 0, seed: (Math.random() * 1000) | 0 }, extra);
+        this.blds.set(b.id, b);
+        for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) { const i = this.idx(xx, yy); this.occ[i] = b.id; this.tree[i] = 0; }
+        this.dirty = true;
+        return b;
+      }
+
+      place(type, x, y) {
+        const c = this.canPlace(type, x, y);
+        if (!c.ok) return c;
+        const d = BUILD[type];
+        for (let yy = y; yy < y + d.h; yy++) for (let xx = x; xx < x + d.w; xx++) this.zone[this.idx(xx, yy)] = 0;
+        this.spend(d.cost);
+        this.addBuilding(type, x, y);
+        return { ok: true, cost: d.cost };
+      }
+
+      removeBuilding(b) {
+        for (let yy = b.y; yy < b.y + b.h; yy++) for (let xx = b.x; xx < b.x + b.w; xx++) this.occ[this.idx(xx, yy)] = 0;
+        this.blds.delete(b.id); this.dirty = true;
+      }
+
+      bulldoze(x, y) {
+        if (!this.inb(x, y)) return { ok: false };
+        const i = this.idx(x, y);
+        if (this.occ[i]) { const b = this.blds.get(this.occ[i]); this.removeBuilding(b); return { ok: true, what: 'building', kind: b.type }; }
+        if (this.road[i]) { this.road[i] = 0; this.dirty = true; return { ok: true, what: 'road' }; }
+        if (this.zone[i]) { this.zone[i] = 0; return { ok: true, what: 'zone' }; }
+        if (this.tree[i]) { this.tree[i] = 0; return { ok: true, what: 'tree' }; }
+        return { ok: false };
+      }
+
+      // ----- сети (электричество и вода идут по дорогам) -----
+      rebuildNets() {
+        const flood = (net, srcKey) => {
+          net.fill(0);
+          const q = [];
+          for (const b of this.blds.values()) {
+            const d = BUILD[b.type]; if (!d || !d[srcKey]) continue;
+            for (let yy = b.y - 1; yy <= b.y + b.h; yy++) for (let xx = b.x - 1; xx <= b.x + b.w; xx++) {
+              if (!this.inb(xx, yy)) continue;
+              const i = this.idx(xx, yy);
+              if (this.road[i] && !net[i]) { net[i] = 1; q.push(i); }
+            }
+          }
+          while (q.length) {
+            const i = q.pop(), x = i % N, y = (i / N) | 0;
+            for (const [dx, dy] of DIRS) {
+              const nx = x + dx, ny = y + dy;
+              if (!this.inb(nx, ny)) continue;
+              const j = this.idx(nx, ny);
+              if (this.road[j] && !net[j]) { net[j] = 1; q.push(j); }
+            }
+          }
+        };
+        flood(this.powerNet, 'power'); flood(this.waterNet, 'water');
+        let pc = 0, wc = 0;
+        for (const b of this.blds.values()) {
+          const d = BUILD[b.type];
+          if (d) { pc += d.power || 0; wc += d.water || 0; }
+          b.road = this.roadNear(b.x, b.y, b.w, b.h, 2) >= 0;
+          b.power = this.roadNear(b.x, b.y, b.w, b.h, 2, this.powerNet) >= 0;
+          b.water = this.roadNear(b.x, b.y, b.w, b.h, 2, this.waterNet) >= 0;
+        }
+        this.stats.powerCap = pc; this.stats.waterCap = wc;
+        this.computeCoverage();
+        this._rc = null; this._cells = null;
+        this.dirty = false;
+      }
+
+      computeCoverage() {
+        COV.forEach(k => this.cov[k].fill(0)); this.pollution.fill(0);
+        for (const b of this.blds.values()) {
+          const d = BUILD[b.type];
+          const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+          if (d && d.cov) {
+            const r = d.r, arr = this.cov[d.cov];
+            for (let y = Math.max(0, Math.floor(cy - r)); y <= Math.min(N - 1, Math.ceil(cy + r)); y++)
+              for (let x = Math.max(0, Math.floor(cx - r)); x <= Math.min(N - 1, Math.ceil(cx + r)); x++) {
+                const dist = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+                if (dist <= r) { const v = Math.round(100 * (1 - dist / r * 0.6)); const i = this.idx(x, y); if (v > arr[i]) arr[i] = v; }
+              }
+          }
+          const poll = d ? (d.poll ? 1.6 : 0) : (b.type === 'I' ? 0.5 + 0.15 * b.lvl : 0);
+          if (poll) {
+            const r = 7;
+            for (let y = Math.max(0, Math.floor(cy - r)); y <= Math.min(N - 1, Math.ceil(cy + r)); y++)
+              for (let x = Math.max(0, Math.floor(cx - r)); x <= Math.min(N - 1, Math.ceil(cx + r)); x++) {
+                const dist = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+                if (dist <= r) this.pollution[this.idx(x, y)] += poll * (1 - dist / r);
+              }
+          }
+        }
+      }
+
+      // ----- сохранение -----
+      serialize() {
+        const arr = a => Array.from(a);
+        return {
+          v: 1, seed: this.seed, name: this.name, sandbox: this.sandbox, money: this.money, date: this.date, days: this.days,
+          tax: this.tax, milestone: this.milestone, nextId: this.nextId, history: this.history,
+          road: arr(this.road), zone: arr(this.zone), tree: arr(this.tree),
+          blds: Array.from(this.blds.values())
+        };
+      }
+      static from(data) {
+        const c = new City({ seed: data.seed, name: data.name, sandbox: data.sandbox });
+        c.money = data.money; c.date = data.date; c.days = data.days; c.tax = data.tax; c.milestone = data.milestone || 0;
+        c.nextId = data.nextId; c.history = data.history || c.history;
+        c.road.set(data.road); c.zone.set(data.zone); c.tree.set(data.tree);
+        for (const b of data.blds) {
+          c.blds.set(b.id, b);
+          for (let yy = b.y; yy < b.y + b.h; yy++) for (let xx = b.x; xx < b.x + b.w; xx++) c.occ[c.idx(xx, yy)] = b.id;
+        }
+        c.dirty = true;
+        return c;
+      }
+    }
+
+    fw.City = City;
+    fw.CITY = { N, BUILD, ZONE, ROAD, COV, MILESTONES, DIRS };
+  }
+});

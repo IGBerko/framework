@@ -1,0 +1,32 @@
+/* Плагин sfx — звуки интерфейса через WebAudio, без файлов. Framework.sfx */
+Framework.plugin('sfx', {
+  version: '1.0.0',
+  install(fw) {
+    let ctx = null, enabled = true;
+    const ac = () => {
+      if (!ctx) { try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; } }
+      if (ctx.state === 'suspended') ctx.resume();
+      return ctx;
+    };
+    function tone(freq, dur, type = 'sine', vol = 0.06, slide = 0, delay = 0) {
+      const a = enabled && ac(); if (!a) return;
+      const t = a.currentTime + delay, o = a.createOscillator(), g = a.createGain();
+      o.type = type; o.frequency.setValueAtTime(freq, t);
+      if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t + dur);
+      g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(a.destination); o.start(t); o.stop(t + dur + 0.02);
+    }
+    fw.sfx = {
+      get enabled() { return enabled; },
+      toggle() { enabled = !enabled; return enabled; },
+      click: () => tone(620, 0.05, 'square', 0.03),
+      build: () => { tone(220, 0.09, 'triangle', 0.07, 120); tone(330, 0.1, 'triangle', 0.05, 80, 0.06); },
+      road: () => tone(150, 0.06, 'sawtooth', 0.03),
+      bulldoze: () => tone(120, 0.18, 'sawtooth', 0.06, -70),
+      error: () => { tone(160, 0.12, 'square', 0.06); tone(120, 0.16, 'square', 0.06, 0, 0.1); },
+      coin: () => { tone(880, 0.07, 'square', 0.04); tone(1320, 0.12, 'square', 0.04, 0, 0.07); },
+      alert: () => { tone(520, 0.12, 'sawtooth', 0.05); tone(390, 0.2, 'sawtooth', 0.05, 0, 0.13); },
+      level: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.18, 'triangle', 0.06, 0, i * 0.1))
+    };
+  }
+});

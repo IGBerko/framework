@@ -1,0 +1,85 @@
+/* Плагин iso — изометрический рендер на canvas: камера, проекция, примитивы. Framework.Iso */
+Framework.plugin('iso', {
+  version: '1.0.0',
+  install(fw) {
+    class Iso {
+      constructor(canvas, tw = 64, th = 32) {
+        this.canvas = canvas; this.ctx = canvas.getContext('2d');
+        this.tw = tw; this.th = th;
+        this.cam = { x: 0, y: 0, zoom: 1 };
+        this.W = 0; this.H = 0; this.dpr = 1;
+        this.resize();
+      }
+      resize() {
+        const r = this.canvas.getBoundingClientRect();
+        this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+        this.W = Math.max(1, r.width); this.H = Math.max(1, r.height);
+        this.canvas.width = Math.round(this.W * this.dpr);
+        this.canvas.height = Math.round(this.H * this.dpr);
+      }
+      begin() { this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0); }
+      // сетка → мир (до камеры)
+      wx(x, y) { return (x - y) * this.tw / 2; }
+      wy(x, y, z = 0) { return (x + y) * this.th / 2 - z; }
+      // сетка → экран
+      P(x, y, z = 0) {
+        const c = this.cam;
+        return [(this.wx(x, y) - c.x) * c.zoom + this.W / 2, (this.wy(x, y, z) - c.y) * c.zoom + this.H / 2];
+      }
+      // экран → дробные координаты сетки (на плоскости z=0)
+      toGrid(sx, sy) {
+        const c = this.cam;
+        const X = (sx - this.W / 2) / c.zoom + c.x, Y = (sy - this.H / 2) / c.zoom + c.y;
+        const a = X / (this.tw / 2), b = Y / (this.th / 2);
+        return [(a + b) / 2, (b - a) / 2];
+      }
+      centerOn(x, y) { this.cam.x = this.wx(x, y); this.cam.y = this.wy(x, y); }
+      pan(dxScreen, dyScreen) { this.cam.x -= dxScreen / this.cam.zoom; this.cam.y -= dyScreen / this.cam.zoom; }
+      zoomAt(sx, sy, factor, min = 0.35, max = 2.5) {
+        const c = this.cam;
+        const X = (sx - this.W / 2) / c.zoom + c.x, Y = (sy - this.H / 2) / c.zoom + c.y; // мировая точка под курсором
+        c.zoom = Math.min(max, Math.max(min, c.zoom * factor));
+        c.x = X - (sx - this.W / 2) / c.zoom; c.y = Y - (sy - this.H / 2) / c.zoom;
+      }
+      // видимый прямоугольник клеток (для отсечения)
+      bounds(n, pad = 3) {
+        const pts = [this.toGrid(0, 0), this.toGrid(this.W, 0), this.toGrid(0, this.H), this.toGrid(this.W, this.H)];
+        const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+        return {
+          x0: Math.max(0, Math.floor(Math.min(...xs)) - pad), x1: Math.min(n - 1, Math.ceil(Math.max(...xs)) + pad),
+          y0: Math.max(0, Math.floor(Math.min(...ys)) - pad), y1: Math.min(n - 1, Math.ceil(Math.max(...ys)) + pad)
+        };
+      }
+      poly(pts, fill, stroke, lw = 1) {
+        const g = this.ctx; g.beginPath();
+        pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+        g.closePath();
+        if (fill) { g.fillStyle = fill; g.fill(); }
+        if (stroke) { g.strokeStyle = stroke; g.lineWidth = lw; g.stroke(); }
+      }
+      // ромб клетки (w×d клеток) на высоте z
+      tile(x, y, fill, stroke, w = 1, d = 1, z = 0) {
+        this.poly([this.P(x, y, z), this.P(x + w, y, z), this.P(x + w, y + d, z), this.P(x, y + d, z)], fill, stroke);
+      }
+      // параллелепипед: две видимые стены и крыша
+      box(x, y, w, d, h, c, z0 = 0) {
+        const top = [this.P(x, y, z0 + h), this.P(x + w, y, z0 + h), this.P(x + w, y + d, z0 + h), this.P(x, y + d, z0 + h)];
+        this.poly([this.P(x, y + d, z0), this.P(x + w, y + d, z0), top[2], top[3]], c.left);
+        this.poly([this.P(x + w, y, z0), this.P(x + w, y + d, z0), top[2], top[1]], c.right);
+        this.poly(top, c.top);
+      }
+      line(a, b, color, lw = 1) {
+        const g = this.ctx, p = this.P(a[0], a[1], a[2] || 0), q = this.P(b[0], b[1], b[2] || 0);
+        g.beginPath(); g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]); g.strokeStyle = color; g.lineWidth = lw; g.stroke();
+      }
+    }
+    // Затемнение/осветление цвета "#rrggbb" на коэффициент k
+    Iso.shade = (hex, k) => {
+      const n = parseInt(hex.slice(1), 16);
+      const c = v => Math.max(0, Math.min(255, Math.round(v * k)));
+      return `rgb(${c(n >> 16)},${c((n >> 8) & 255)},${c(n & 255)})`;
+    };
+    Iso.palette = hex => ({ top: Iso.shade(hex, 1.08), left: Iso.shade(hex, 0.78), right: Iso.shade(hex, 0.62) });
+    fw.Iso = Iso;
+  }
+});
